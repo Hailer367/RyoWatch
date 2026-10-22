@@ -31,9 +31,18 @@ type Client struct {
 
 func New(wsURL, httpURL string) *Client {
 	c := &Client{wsURL: wsURL, httpURL: httpURL}
-	go c.connectWS()
 	if hc, err := ethclient.Dial(httpURL); err == nil {
 		c.http = hc
+	}
+	done := make(chan struct{})
+	go func() {
+		c.connectWS()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		fmt.Println("WebSocket connect timed out; will retry in background")
 	}
 	return c
 }

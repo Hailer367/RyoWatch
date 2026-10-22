@@ -130,6 +130,7 @@ func getCached(key string, block uint64) (*big.Int, bool) {
 	if !ok || e.block != block {
 		return nil, false
 	}
+	// If the pool is dirty, don't use cache.
 	if dirtyPools[key] {
 		return nil, false
 	}
@@ -144,7 +145,6 @@ func setCached(key string, block uint64, result *big.Int, err error) {
 
 // ---- QuoteHop: single hop ----
 func QuoteHop(ctx context.Context, client *rpc.Client, hop config.Hop, amountIn *big.Int) (*big.Int, error) {
-	// Check cache first.
 	cacheKey := hop.Router + ":" + hop.TokenIn + ":" + hop.TokenOut + ":" + amountIn.String()
 	blockNum := uint64(0)
 	if header, err := client.HeaderByNumber(ctx, nil); err == nil && header != nil {
@@ -273,21 +273,19 @@ func QuoteHop(ctx context.Context, client *rpc.Client, hop config.Hop, amountIn 
 }
 
 // quoteV2Local computes the V2 output locally from pool reserves.
-// Saves one RPC call per V2 hop (getReserves instead of getAmountsOut, and the math is local).
 func quoteV2Local(ctx context.Context, client *rpc.Client, tokenIn, tokenOut string, amountIn *big.Int) (*big.Int, error) {
-	// Get the pair address from the factory.
 	pairAddr, err := getV2Pair(ctx, client, tokenIn, tokenOut)
 	if err != nil {
 		return nil, err
 	}
-	// Read reserves.
 	reserves, err := getReserves(ctx, client, pairAddr)
 	if err != nil {
 		return nil, err
 	}
-	// Determine which reserve is tokenIn vs tokenOut.
-	// UniV2: token0 < token1 by address. reserve0 = token0's reserve, reserve1 = token1's reserve.
-	token0, _ := getToken0(ctx, client, pairAddr)
+	token0, err := getToken0(ctx, client, pairAddr)
+	if err != nil {
+		return nil, err
+	}
 	var reserveIn, reserveOut *big.Int
 	if token0 == tokenIn {
 		reserveIn = reserves[0]
@@ -296,7 +294,6 @@ func quoteV2Local(ctx context.Context, client *rpc.Client, tokenIn, tokenOut str
 		reserveIn = reserves[1]
 		reserveOut = reserves[0]
 	}
-	// Constant product: out = in * 997 * reserveOut / (reserveIn * 1000 + in * 997)
 	amountInWithFee := new(big.Int).Mul(amountIn, big.NewInt(997))
 	numerator := new(big.Int).Mul(amountInWithFee, reserveOut)
 	denominator := new(big.Int).Add(
@@ -436,13 +433,10 @@ func (wp *WatchedPool) ClearDirty() {
 // Alchemy filters by address + event topic, so we only receive events for pools
 // we care about — minimal credit usage.
 func WatchSwapEvents(ctx context.Context, client *rpc.Client, pools []*WatchedPool) {
-	// Build the filter query for Swap events on the watched pools.
 	addresses := make([]common.Address, len(pools))
 	for i, p := range pools {
 		addresses[i] = common.HexToAddress(p.Address)
 	}
-	// Swap event topic0 for Uniswap V2: keccak256("Swap(address,uint256,uint256,uint256,uint256,address)")
-	// We subscribe to all Swap-like events by using multiple topics.
 	q := ethereum.FilterQuery{
 		Addresses: addresses,
 	}
