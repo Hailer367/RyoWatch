@@ -4,8 +4,6 @@ import (
 	"math/big"
 	"os"
 	"strconv"
-
-	"github.com/joho/godotenv"
 )
 
 // ---- Base mainnet addresses (verified on-chain) ----
@@ -17,6 +15,7 @@ const (
 	UniswapV3Router = "0x2626664c2603336E57B271c5C0b26F421741e481"
 	UniswapV3Quoter = "0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a"
 	UniswapV2Router = "0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24"
+	UniswapV2Factory = "0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6"
 
 	AerodromeRouter  = "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43"
 	AerodromeFactory = "0x420DD381b31aEf6683db6B902084cB0FFECe40Da"
@@ -46,6 +45,10 @@ var (
 	CircuitBreakerN  int     = 3
 	PollIntervalSec  float64 = 2.0
 	DryRun           bool    = true
+	// SimMargin: only simulate if off-chain profit exceeds minProfit by this factor.
+	SimMargin float64 = 1.5
+	// SimRPCURL: separate RPC for simulate calls (use a local anvil fork for ~1ms latency).
+	SimRPCURL string
 )
 
 // ---- RPC ----
@@ -58,13 +61,13 @@ var (
 
 // ---- Route definition ----
 type Hop struct {
-	Dex        string // "v3", "v2", "aerodrome", "slipstream"
+	Dex        string
 	Router     string
 	TokenIn    string
 	TokenOut   string
-	Fee        uint32 // v3
-	Stable     bool   // aerodrome
-	TickSpacing int32 // slipstream
+	Fee        uint32
+	Stable     bool
+	TickSpacing int32
 	MinOut     uint64
 }
 
@@ -100,8 +103,9 @@ var DefaultRoutes = []Route{
 }
 
 func Load() error {
-	_ = godotenv.Load()
+	// godotenv not available; .env is loaded manually in main.go
 	RPCURL = getenv("BASE_RPC_URL", "https://mainnet.base.org")
+	SimRPCURL = getenv("SIM_RPC_URL", "") // empty = use RPCURL
 	RyoAddress = getenv("RYO_ADDRESS", "")
 	OperatorAddress = getenv("OPERATOR_ADDRESS", "")
 	OperatorKey = getenv("OPERATOR_PRIVATE_KEY", "")
@@ -122,6 +126,9 @@ func Load() error {
 	if v, err := strconv.ParseFloat(getenv("POLL_INTERVAL_SECONDS", "2.0"), 64); err == nil {
 		PollIntervalSec = v
 	}
+	if v, err := strconv.ParseFloat(getenv("SIM_MARGIN", "1.5"), 64); err == nil {
+		SimMargin = v
+	}
 	DryRun = getenv("DRY_RUN", "true") == "true"
 	return nil
 }
@@ -133,7 +140,13 @@ func getenv(k, def string) string {
 	return def
 }
 
-// Units helpers
+func SimRPC() string {
+	if SimRPCURL != "" {
+		return SimRPCURL
+	}
+	return RPCURL
+}
+
 func ToRaw(amount float64, decimals int) *big.Int {
 	f := new(big.Float).SetPrec(256)
 	f.SetFloat64(amount)

@@ -32,7 +32,6 @@ type Client struct {
 func New(wsURL, httpURL string) *Client {
 	c := &Client{wsURL: wsURL, httpURL: httpURL}
 	go c.connectWS()
-	// dial http eagerly
 	if hc, err := ethclient.Dial(httpURL); err == nil {
 		c.http = hc
 	}
@@ -70,7 +69,6 @@ func (c *Client) httpClient() *ethclient.Client {
 	if c.http != nil {
 		return c.http
 	}
-	// lazy dial
 	hc, err := ethclient.Dial(c.httpURL)
 	if err != nil {
 		return nil
@@ -81,13 +79,12 @@ func (c *Client) httpClient() *ethclient.Client {
 	return hc
 }
 
-// Call executes an eth_call from the zero address. Prefers WebSocket; falls back to HTTP.
+// Call executes an eth_call. Prefers WebSocket; falls back to HTTP.
 func (c *Client) Call(ctx context.Context, to common.Address, data []byte) ([]byte, error) {
 	return c.CallFrom(ctx, common.Address{}, to, data)
 }
 
-// CallFrom executes an eth_call from a specific sender. Used for simulate/execute paths
-// where the contract checks msg.sender.
+// CallFrom executes an eth_call from a specific sender.
 func (c *Client) CallFrom(ctx context.Context, from, to common.Address, data []byte) ([]byte, error) {
 	msg := ethereum.CallMsg{From: from, To: &to, Data: data}
 	if cli := c.wsClient(); cli != nil && c.wsAlive.Load() {
@@ -105,13 +102,29 @@ func (c *Client) CallFrom(ctx context.Context, from, to common.Address, data []b
 	return hc.CallContract(ctx, msg, nil)
 }
 
-func (c *Client) SubscribeNewHeads(ctx context.Context) (chan *types.Header, ethereum.Subscription, error) {
+// SubscribeNewHeads returns a channel of new block headers.
+func (c *Client) SubscribeNewHeads(ctx context.Context) (<-chan *types.Header, ethereum.Subscription, error) {
 	cli := c.wsClient()
 	if cli == nil {
 		return nil, nil, fmt.Errorf("ws not connected")
 	}
 	ch := make(chan *types.Header, 16)
 	sub, err := cli.SubscribeNewHead(ctx, ch)
+	if err != nil {
+		return nil, nil, err
+	}
+	return ch, sub, nil
+}
+
+// SubscribeLogs subscribes to log events matching the given filter.
+// Used for event-driven re-quoting: only re-quote pools that have traded.
+func (c *Client) SubscribeLogs(ctx context.Context, q ethereum.FilterQuery) (chan types.Log, ethereum.Subscription, error) {
+	cli := c.wsClient()
+	if cli == nil {
+		return nil, nil, fmt.Errorf("ws not connected")
+	}
+	ch := make(chan types.Log, 256)
+	sub, err := cli.SubscribeFilterLogs(ctx, q, ch)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -168,20 +181,14 @@ func (c *Client) WaitForReceipt(ctx context.Context, hash common.Hash) (*types.R
 	}
 }
 
-// BlockNumber returns the current block number (used for pre-warm pings and caching).
 func (c *Client) BlockNumber(ctx context.Context) (uint64, error) {
 	hc := c.httpClient()
 	if hc == nil {
 		return 0, fmt.Errorf("no http client")
 	}
-	n, err := hc.BlockNumber(ctx)
-	if err != nil {
-		return 0, err
-	}
-	return n, nil
+	return hc.BlockNumber(ctx)
 }
 
-// HeaderByNumber returns the block header for the given block number (nil = latest).
 func (c *Client) HeaderByNumber(ctx context.Context, number *big.Int) (*types.Header, error) {
 	hc := c.httpClient()
 	if hc == nil {
