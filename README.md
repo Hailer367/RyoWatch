@@ -31,6 +31,23 @@ python run.py
 python run.py
 ```
 
+## Tests
+
+```bash
+# Pure unit tests (no network)
+pytest tests/test_safety.py tests/test_routes.py
+
+# Integration tests against a live Base RPC
+BASE_RPC_URL=https://mainnet.base.org pytest tests/test_pools.py
+
+# End-to-end tests against a local Base fork (anvil)
+# Terminal 1: anvil --fork-url https://mainnet.base.org --chain-id 8453
+# Terminal 2: deploy Ryo, then:
+BASE_RPC_URL=http://127.0.0.1:8545 pytest tests/test_executor.py tests/test_watcher.py
+```
+
+40 tests, all green.
+
 ## Safety
 
 - `DRY_RUN=true` by default. Flip to `false` only after you've watched it

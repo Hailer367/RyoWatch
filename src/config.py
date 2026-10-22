@@ -7,6 +7,21 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 import os
 
+# Load .env if present (so the bot and tests pick up BASE_RPC_URL, RYO_ADDRESS, etc.).
+# Parsed by hand so there is no extra dependency.
+_env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+if os.path.exists(_env_path):
+    with open(_env_path) as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if not _line or _line.startswith("#") or "=" not in _line:
+                continue
+            _key, _val = _line.split("=", 1)
+            _key = _key.strip()
+            _val = _val.strip().strip('"').strip("'")
+            if _key and _key not in os.environ:
+                os.environ[_key] = _val
+
 # ---- Base mainnet addresses (verified on-chain) ----
 BALANCER_VAULT = "0xBA12222222228d8Ba445958a75a0704d566BF2C8"
 WETH = "0x4200000000000000000000000000000000000006"
