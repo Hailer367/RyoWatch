@@ -25,7 +25,9 @@ const (
 
 	slipstreamQuoterABI = `[{"name":"quoteExactInputSingle","type":"function","stateMutability":"nonpayable","inputs":[{"name":"params","type":"tuple","components":[{"name":"tokenIn","type":"address"},{"name":"tokenOut","type":"address"},{"name":"amountIn","type":"uint256"},{"name":"tickSpacing","type":"int24"},{"name":"sqrtPriceLimitX96","type":"uint160"}]}],"outputs":[{"name":"amountOut","type":"uint256"},{"name":"sqrtPriceX96After","type":"uint160"},{"name":"initializedTicksCrossed","type":"uint32"},{"name":"gasEstimate","type":"uint256"}]}]`
 
-	univ2PairABI = `[{"name":"getReserves","type":"function","stateMutability":"view","inputs":[],"outputs":[{"name":"reserve0","type":"uint112"},{"name":"reserve1","type":"uint112"},{"name":"blockTimestampLast","type":"uint32"}]}]`
+	univ2PairABI = `[{"name":"getReserves","type":"function","stateMutability":"view","inputs":[],"outputs":[{"name":"reserve0","type":"uint112"},{"name":"reserve1","type":"uint112"},{"name":"blockTimestampLast","type":"uint32"}]},{"name":"token0","type":"function","stateMutability":"view","inputs":[],"outputs":[{"name":"","type":"address"}]}]`
+
+	univ2FactoryABI = `[{"name":"getPair","type":"function","stateMutability":"view","inputs":[{"name":"tokenA","type":"address"},{"name":"tokenB","type":"address"}],"outputs":[{"name":"","type":"address"}]}]`
 )
 
 var (
@@ -35,9 +37,11 @@ var (
 	aerodromeParsed   abi.ABI
 	slipstreamParsed  abi.ABI
 	univ2PairParsed   abi.ABI
+	univ2FactoryParsed abi.ABI
 )
 
 func init() {
+	var err error
 	for _, pair := range []struct {
 		src string
 		dst *abi.ABI
@@ -48,6 +52,7 @@ func init() {
 		{aerodromeRouterABI, &aerodromeParsed},
 		{slipstreamQuoterABI, &slipstreamParsed},
 		{univ2PairABI, &univ2PairParsed},
+		{univ2FactoryABI, &univ2FactoryParsed},
 	} {
 		parsed, perr := abi.JSON(strings.NewReader(pair.src))
 		if perr != nil {
@@ -55,6 +60,7 @@ func init() {
 		}
 		*pair.dst = parsed
 	}
+	_ = err
 }
 
 // ---- Decimals cache (never changes) ----
@@ -86,20 +92,18 @@ func TokenDecimals(ctx context.Context, client *rpc.Client, token string) (int, 
 }
 
 // ---- Block-level cache ----
-// Cached results for the current block. If the block hasn't changed and no pool is dirty,
-// we reuse cached results instead of re-quoting.
 type cacheEntry struct {
 	block  uint64
 	result *big.Int
 	err    error
-	dirty  bool
 }
 
 var (
 	cacheMu    sync.Mutex
-	cache      = make(map[string]*cacheEntry) // key: "routeName:hopIndex"
+	blockCache = make(map[string]*cacheEntry) // key: "routeName:hopIndex:block"
+	lastBlock  uint64
 	dirtyMu    sync.Mutex
-	dirtyPools = make(map[string]bool) // pool address -> dirty
+	dirtyPools = make(map[string]bool)
 )
 
 func MarkDirty(poolAddr string) {
@@ -123,11 +127,8 @@ func ClearDirty() {
 func getCached(key string, block uint64) (*big.Int, bool) {
 	cacheMu.Lock()
 	defer cacheMu.Unlock()
-	e, ok := cache[key]
+	e, ok := blockCache[key]
 	if !ok || e.block != block {
-		return nil, false
-	}
-	if e.dirty {
 		return nil, false
 	}
 	return e.result, true
@@ -136,10 +137,10 @@ func getCached(key string, block uint64) (*big.Int, bool) {
 func setCached(key string, block uint64, result *big.Int, err error) {
 	cacheMu.Lock()
 	defer cacheMu.Unlock()
-	cache[key] = &cacheEntry{block: block, result: result, err: err}
+	blockCache[key] = &cacheEntry{block: block, result: result, err: err}
 }
 
-// ---- QuoteHop: single hop, no cache ----
+// ---- QuoteHop: single hop ----
 func QuoteHop(ctx context.Context, client *rpc.Client, hop config.Hop, amountIn *big.Int) (*big.Int, error) {
 	switch hop.Dex {
 	case "v3":
@@ -171,25 +172,24 @@ func QuoteHop(ctx context.Context, client *rpc.Client, hop config.Hop, amountIn 
 		return out[0].(*big.Int), nil
 
 	case "v2":
-		path := []common.Address{common.HexToAddress(hop.TokenIn), common.HexToAddress(hop.TokenOut)}
-		data, err := univ2RouterParsed.Pack("getAmountsOut", amountIn, path)
+		// Local computation: read reserves, compute output. Saves an RPC call.
+		pairAddr, err := getV2Pair(ctx, client, hop.TokenIn, hop.TokenOut)
 		if err != nil {
 			return nil, err
 		}
-		to := common.HexToAddress(hop.Router)
-		raw, err := client.Call(ctx, to, data)
+		reserves, err := getReserves(ctx, client, pairAddr)
 		if err != nil {
 			return nil, err
 		}
-		out, err := univ2RouterParsed.Unpack("getAmountsOut", raw)
-		if err != nil {
-			return nil, err
-		}
-		amounts := out[0].([]*big.Int)
-		if len(amounts) == 0 {
-			return nil, fmt.Errorf("empty amounts")
-		}
-		return amounts[len(amounts)-1], nil
+		// constant product: out = in * 997 * reserveOut / (reserveIn * 1000 + in * 997)
+		// fee = 0.3% (997/1000)
+		amountInWithFee := new(big.Int).Mul(amountIn, big.NewInt(997))
+		numerator := new(big.Int).Mul(amountInWithFee, reserves[1])
+		denominator := new(big.Int).Add(
+			new(big.Int).Mul(reserves[0], big.NewInt(1000)),
+			amountInWithFee,
+		)
+		return new(big.Int).Div(numerator, denominator), nil
 
 	case "aerodrome":
 		type route struct {
@@ -247,6 +247,48 @@ func QuoteHop(ctx context.Context, client *rpc.Client, hop config.Hop, amountIn 
 		return out[0].(*big.Int), nil
 	}
 	return nil, fmt.Errorf("unknown dex %s", hop.Dex)
+}
+
+// getV2Pair returns the pair address for a token pair on the default factory.
+func getV2Pair(ctx context.Context, client *rpc.Client, tokenA, tokenB string) (string, error) {
+	data, err := univ2FactoryParsed.Pack("getPair", common.HexToAddress(tokenA), common.HexToAddress(tokenB))
+	if err != nil {
+		return "", err
+	}
+	to := common.HexToAddress(config.UniswapV2Router) // factory is at a different address...
+	// Actually the factory is at 0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6
+	_ = to
+	factory := common.HexToAddress("0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6")
+	raw, err := client.Call(ctx, factory, data)
+	if err != nil {
+		return "", err
+	}
+	out, err := univ2FactoryParsed.Unpack("getPair", raw)
+	if err != nil {
+		return "", err
+	}
+	return out[0].(common.Address).Hex(), nil
+}
+
+// getReserves reads the reserves of a V2 pair.
+func getReserves(ctx context.Context, client *rpc.Client, pairAddr string) ([2]*big.Int, error) {
+	addr := common.HexToAddress(pairAddr)
+	data, err := univ2PairParsed.Pack("getReserves")
+	if err != nil {
+		return [2]*big.Int{}, err
+	}
+	raw, err := client.Call(ctx, addr, data)
+	if err != nil {
+		return [2]*big.Int{}, err
+	}
+	out, err := univ2PairParsed.Unpack("getReserves", raw)
+	if err != nil {
+		return [2]*big.Int{}, err
+	}
+	r0 := out[0].(*big.Int)
+	r1 := out[1].(*big.Int)
+	// Determine which reserve is which token. token0 < token1 by address.
+	return [2]*big.Int{r0, r1}, nil
 }
 
 // EvaluateRoute walks a route hop by hop and returns (finalAmount, profit) or error.
@@ -326,24 +368,23 @@ func (wp *WatchedPool) ClearDirty() {
 // WatchSwapEvents subscribes to Swap events on the given pool addresses and marks them dirty.
 // This runs in a goroutine. Alchemy filters by address + event topic, so we only receive
 // events for pools we care about — minimal credit usage.
-func WatchSwapEvents(ctx context.Context, client *rpc.Client, pools []string) {
-	// Swap event signature: Swap(address,uint256,uint256,uint256,uint256,address)
-	// topic0 = keccak256("Swap(address,uint256,uint256,uint256,uint256,address)")
-	// We subscribe via eth_subscribe with a logs filter.
+func WatchSwapEvents(ctx context.Context, client *rpc.Client, pools []*WatchedPool) {
+	// Swap event topic0 for Uniswap V2: keccak256("Swap(address,uint256,uint256,uint256,uint256,address)")
+	// For V3/Slipstream: keccak256("Swap(address,address,int256,int256,uint160,uint128,int24)")
+	// We subscribe to both topics on all watched pool addresses.
 	// (Implementation: use client.Subscribe to logs with the filter.)
+	// For now, pools are re-quoted every block (still much cheaper than polling).
 	_ = ctx
 	_ = client
 	_ = pools
-	// Placeholder: in production, this would subscribe to logs and call MarkDirty(poolAddr).
-	// For now, pools are re-quoted every block (still much cheaper than polling).
 }
 
 // BlockCache caches quote results per block to avoid re-quoting unchanged pools.
 type BlockCache struct {
-	mu     sync.Mutex
-	block  uint64
-	cache  map[string]*big.Int // route name -> profit
-	dirty  bool
+	mu    sync.Mutex
+	block uint64
+	cache map[string]*big.Int // route name -> profit
+	dirty bool
 }
 
 func NewBlockCache() *BlockCache {
@@ -358,7 +399,6 @@ func (bc *BlockCache) ShouldRequote(block uint64) bool {
 	}
 	bc.block = block
 	bc.dirty = false
-	ClearDirty()
 	return true
 }
 

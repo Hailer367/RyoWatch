@@ -168,6 +168,28 @@ func (c *Client) WaitForReceipt(ctx context.Context, hash common.Hash) (*types.R
 	}
 }
 
+// BlockNumber returns the current block number (used for pre-warm pings and caching).
+func (c *Client) BlockNumber(ctx context.Context) (uint64, error) {
+	hc := c.httpClient()
+	if hc == nil {
+		return 0, fmt.Errorf("no http client")
+	}
+	n, err := hc.BlockNumber(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// HeaderByNumber returns the block header for the given block number (nil = latest).
+func (c *Client) HeaderByNumber(ctx context.Context, number *big.Int) (*types.Header, error) {
+	hc := c.httpClient()
+	if hc == nil {
+		return nil, fmt.Errorf("no http client")
+	}
+	return hc.HeaderByNumber(ctx, number)
+}
+
 func (c *Client) Stats() (ws, http int64) {
 	return c.callsWS.Load(), c.callsHTTP.Load()
 }

@@ -16,15 +16,26 @@ type Watcher struct {
 	client  *rpc.Client
 	safety  *safety.Net
 	routes  []config.Route
+	cache   *pools.BlockCache
 }
 
 func New(client *rpc.Client, routes []config.Route) *Watcher {
-	return &Watcher{client: client, safety: safety.New(), routes: routes}
+	return &Watcher{client: client, safety: safety.New(), routes: routes, cache: pools.NewBlockCache()}
 }
 
 // ScanOnce runs one pass over all routes. Returns number of trades attempted.
 func (w *Watcher) ScanOnce(ctx context.Context) int {
 	attempted := 0
+
+	// Block-level cache: if the block hasn't changed, skip all RPC calls and reuse cached results.
+	blockNum := uint64(0)
+	if header, err := w.client.HeaderByNumber(ctx, nil); err == nil && header != nil {
+		blockNum = header.Number.Uint64()
+	}
+	if !w.cache.ShouldRequote(blockNum) {
+		return 0
+	}
+
 	for _, route := range w.routes {
 		// 1. Quote off-chain.
 		_, profit, err := pools.EvaluateRoute(ctx, w.client, route, nil)
@@ -34,6 +45,12 @@ func (w *Watcher) ScanOnce(ctx context.Context) int {
 		}
 		profitTokens := config.FromRaw(profit, 18) // approximate; use route asset decimals in prod
 		if profitTokens < route.MinProfit {
+			continue
+		}
+
+		// Simulation gating: only simulate if off-chain profit exceeds minProfit by a margin.
+		if profitTokens < route.MinProfit*1.5 {
+			fmt.Printf("[%s] off-chain profit too small (%.6f < %.6f * 1.5)\n", route.Name, profitTokens, route.MinProfit)
 			continue
 		}
 
@@ -112,6 +129,23 @@ func (w *Watcher) Run(ctx context.Context) {
 	}
 	defer sub.Unsubscribe()
 	fmt.Println("subscribed to new blocks via WebSocket")
+
+	// Pre-warm: periodic ping to keep the WebSocket connection hot and avoid
+	// idle disconnects from the RPC provider.
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if _, err := w.client.BlockNumber(ctx); err != nil {
+					fmt.Printf("pre-warm ping failed: %v\n", err)
+				}
+			}
+		}
+	}()
 
 	for {
 		select {
