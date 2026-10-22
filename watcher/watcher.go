@@ -37,10 +37,21 @@ func (w *Watcher) ScanOnce(ctx context.Context) int {
 			continue
 		}
 
-		// 2. Safety nets.
+		// 2. Safety nets (gas + trade size + circuit breaker). Rate limit is checked only
+		//    before sending a transaction, so simulations never trip it.
 		gasPrice, _ := w.client.SuggestGasPrice(ctx)
 		gasGwei := gasPrice.Int64() / 1e9
-		ok, reason := w.safety.AllClear(gasGwei, route.Amount)
+		ok, reason := w.safety.CheckGas(gasGwei)
+		if !ok {
+			fmt.Printf("[%s] skipped: %s\n", route.Name, reason)
+			continue
+		}
+		ok, reason = w.safety.CheckTradeSize(route.Amount)
+		if !ok {
+			fmt.Printf("[%s] skipped: %s\n", route.Name, reason)
+			continue
+		}
+		ok, reason = w.safety.CheckCircuitBreaker()
 		if !ok {
 			fmt.Printf("[%s] skipped: %s\n", route.Name, reason)
 			continue
@@ -58,7 +69,16 @@ func (w *Watcher) ScanOnce(ctx context.Context) int {
 			continue
 		}
 
-		// 4. Execute (or dry-run).
+		// 4. Rate limit (only before sending a real transaction; dry runs are free).
+		if !config.DryRun {
+			ok, reason = w.safety.CheckRateLimit()
+			if !ok {
+				fmt.Printf("[%s] skipped: %s\n", route.Name, reason)
+				continue
+			}
+		}
+
+		// 5. Execute (or dry-run).
 		attempted++
 		if config.DryRun {
 			fmt.Printf("[%s] DRY RUN: would execute (profit=%v)\n", route.Name, simProfit)
@@ -104,7 +124,9 @@ func (w *Watcher) Run(ctx context.Context) {
 				return
 			}
 			fmt.Printf("new block %d\n", header.Number.Uint64())
+			start := time.Now()
 			w.ScanOnce(ctx)
+			fmt.Printf("round time: %v\n", time.Since(start))
 		}
 	}
 }
@@ -117,7 +139,9 @@ func (w *Watcher) runPolling(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			start := time.Now()
 			w.ScanOnce(ctx)
+			fmt.Printf("round time: %v\n", time.Since(start))
 		}
 	}
 }
