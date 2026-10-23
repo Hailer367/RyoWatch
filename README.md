@@ -22,27 +22,97 @@ Both share the same `.env` format and the same on-chain logic.
 
 ## Setup (Go)
 
+### 1. Prerequisites
+- Go 1.24 or newer (`go version`)
+- A Base RPC endpoint — **Alchemy WebSocket recommended** (e.g. `wss://base-mainnet.g.alchemy.com/v2/YOUR_KEY`)
+- A deployed Ryo contract address (`RYO_ADDRESS`) and an operator keypair
+
+### 2. Configure
 ```bash
-# Prerequisites: Go 1.24+, a Base RPC endpoint (Alchemy recommended)
 cp .env.example .env
-# Fill in RYO_ADDRESS, OPERATOR_ADDRESS, OPERATOR_PRIVATE_KEY, etc.
-
-# Build
-make build
-
-# Run (dry run by default)
-make run
 ```
+Edit `.env` and fill in at minimum:
+- `BASE_RPC_URL` — your Alchemy WebSocket or HTTP URL
+- `RYO_ADDRESS` — deployed Ryo contract address
+- `OPERATOR_ADDRESS` / `OPERATOR_PRIVATE_KEY` — the bot's hot wallet (must be the operator on the contract)
+- `DRY_RUN=true` (default) — keep this true until you're ready to trade real funds
+
+Optional safety knobs (defaults are conservative):
+- `MAX_TRADE_SIZE` (default 1.0 token)
+- `MAX_GAS_PRICE_GWEI` (default 50)
+- `MIN_PROFIT` (default 0.001)
+- `POOL_DEPTH_FRACTION` (default 0.01 = 1% of shallowest pool)
+- `CIRCUIT_BREAKER_FAILURES` (default 3)
+
+### 3. Build
+```bash
+make build
+```
+
+### 4. Run (dry run by default)
+```bash
+make run
+# or directly:
+./ryowatch
+```
+
+### 5. Single scan (useful for testing)
+```bash
+./ryowatch --once
+```
+
+### 6. Verify it's working
+You should see:
+```
+Ryowatch starting. dry_run=true
+Ryo contract: 0x...
+Operator: 0x...
+watching 2 pools for swap events
+subscribed to new blocks via WebSocket
+new block 12345678
+no profitable routes this round
+round time: 70ms
+```
+
+### Troubleshooting
+- **"WebSocket connect timed out"** — your RPC URL may not support WebSocket; the bot falls back to HTTP polling automatically.
+- **"RYO_ADDRESS not set"** — set `RYO_ADDRESS` in `.env`.
+- **"OPERATOR_ADDRESS required when OPERATOR_PRIVATE_KEY is set"** — fill in both.
+- **No profitable routes** — normal on a calm market; the bot only trades when a price gap exists.
+- **Pool event re-scans** — the bot reacts to pool trades within ~250ms; this is expected.
+
 
 ## Setup (Python, reference)
 
+### 1. Prerequisites
+- Python 3.10+ and pip
+- A Base RPC endpoint
+
+### 2. Configure
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
+# Edit .env with your RYO_ADDRESS, OPERATOR_ADDRESS, OPERATOR_PRIVATE_KEY, etc.
+```
+
+### 3. Run
+```bash
 python run.py
 ```
+
+### 4. Run tests
+```bash
+# Pure unit tests (no RPC needed)
+pytest tests/test_routes.py tests/test_safety.py
+
+# Live RPC tests (requires BASE_RPC_URL)
+BASE_RPC_URL=https://mainnet.base.org pytest tests/test_pools.py
+```
+
+> The Python version is the readable reference implementation. The Go version is the production bot.
+
 
 ## Configuration
 
