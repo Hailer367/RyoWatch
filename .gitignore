@@ -2,4 +2,4 @@ __pycache__/
 .venv/
 .env
 *.pyc
-.DS_Store
+.DS_Storeryowatch
