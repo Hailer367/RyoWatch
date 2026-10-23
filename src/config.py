@@ -27,6 +27,10 @@ BALANCER_VAULT = "0xBA12222222228d8Ba445958a75a0704d566BF2C8"
 WETH = "0x4200000000000000000000000000000000000006"
 USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
 
+cbBTC = "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf"
+AERO = "0x940181a94A35A4569E4529A3CDfB74e38FD98631"
+EURC = "0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42"
+
 UNISWAP_V3_ROUTER = "0x2626664c2603336E57B271c5C0b26F421741e481"
 UNISWAP_V3_QUOTER = "0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a"
 UNISWAP_V2_ROUTER = "0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24"
@@ -102,6 +106,33 @@ DEFAULT_ROUTES: List[Route] = [
         hops=[
             Hop(dex="v3", router=UNISWAP_V3_ROUTER, token_in=USDC, token_out=WETH, fee=500),
             Hop(dex="v2", router=UNISWAP_V2_ROUTER, token_in=WETH, token_out=USDC, min_out=1),
+        ],
+    ),
+    Route(
+        name="cbbtc-weth-aero-v3",
+        asset=WETH,
+        amount=0.1,
+        hops=[
+            Hop(dex="aerodrome", router=AERODROME_ROUTER, token_in=WETH, token_out=cbBTC, stable=False, min_out=1),
+            Hop(dex="v3", router=UNISWAP_V3_ROUTER, token_in=cbBTC, token_out=WETH, fee=500, min_out=1),
+        ],
+    ),
+    Route(
+        name="aero-usdc-v3-aero",
+        asset=USDC,
+        amount=100.0,
+        hops=[
+            Hop(dex="v3", router=UNISWAP_V3_ROUTER, token_in=USDC, token_out=AERO, fee=100, min_out=1),
+            Hop(dex="aerodrome", router=AERODROME_ROUTER, token_in=AERO, token_out=USDC, stable=False, min_out=1),
+        ],
+    ),
+    Route(
+        name="usdc-eurc-slip-v3",
+        asset=USDC,
+        amount=100.0,
+        hops=[
+            Hop(dex="slipstream", router=SLIPSTREAM_ROUTER, token_in=USDC, token_out=EURC, tick_spacing=50, min_out=1),
+            Hop(dex="v3", router=UNISWAP_V3_ROUTER, token_in=EURC, token_out=USDC, fee=10000, min_out=1),
         ],
     ),
 ]

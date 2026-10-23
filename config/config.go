@@ -12,6 +12,9 @@ const (
 	BalancerVault  = "0xBA12222222228d8Ba445958a75a0704d566BF2C8"
 	WETH           = "0x4200000000000000000000000000000000000006"
 	USDC           = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+	cbBTC          = "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf"
+	AERO           = "0x940181a94A35A4569E4529A3CDfB74e38FD98631"
+	EURC           = "0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42"
 
 	UniswapV3Router = "0x2626664c2603336E57B271c5C0b26F421741e481"
 	UniswapV3Quoter = "0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a"
@@ -101,6 +104,36 @@ var DefaultRoutes = []Route{
 		Hops: []Hop{
 			{Dex: "v3", Router: UniswapV3Router, TokenIn: USDC, TokenOut: WETH, Fee: 500, MinOut: 1},
 			{Dex: "v2", Router: UniswapV2Router, TokenIn: WETH, TokenOut: USDC, MinOut: 1},
+		},
+		MinProfit: 0.001,
+	},
+	{
+		Name:   "cbbtc-weth-aero-v3",
+		Asset:  WETH,
+		Amount: 0.1,
+		Hops: []Hop{
+			{Dex: "aerodrome", Router: AerodromeRouter, TokenIn: WETH, TokenOut: cbBTC, Stable: false, MinOut: 1},
+			{Dex: "v3", Router: UniswapV3Router, TokenIn: cbBTC, TokenOut: WETH, Fee: 500, MinOut: 1},
+		},
+		MinProfit: 0.001,
+	},
+	{
+		Name:   "aero-usdc-v3-aero",
+		Asset:  USDC,
+		Amount: 100.0,
+		Hops: []Hop{
+			{Dex: "v3", Router: UniswapV3Router, TokenIn: USDC, TokenOut: AERO, Fee: 100, MinOut: 1},
+			{Dex: "aerodrome", Router: AerodromeRouter, TokenIn: AERO, TokenOut: USDC, Stable: false, MinOut: 1},
+		},
+		MinProfit: 0.001,
+	},
+	{
+		Name:   "usdc-eurc-slip-v3",
+		Asset:  USDC,
+		Amount: 100.0,
+		Hops: []Hop{
+			{Dex: "slipstream", Router: SlipstreamRouter, TokenIn: USDC, TokenOut: EURC, TickSpacing: 50, MinOut: 1},
+			{Dex: "v3", Router: UniswapV3Router, TokenIn: EURC, TokenOut: USDC, Fee: 10000, MinOut: 1},
 		},
 		MinProfit: 0.001,
 	},
