@@ -135,3 +135,14 @@ def aerodrome_router(addr):
 
 def slipstream_quoter(addr):
     return w3.eth.contract(address=checksum(addr), abi=SLIPSTREAM_QUOTER_ABI)
+
+
+# ---- Factory helpers for pool resolution ----
+UNIV2_FACTORY_ABI = [{"name":"getPair","type":"function","stateMutability":"view","inputs":[{"name":"tokenA","type":"address"},{"name":"tokenB","type":"address"}],"outputs":[{"name":"","type":"address"}]}]
+UNIV3_FACTORY_ABI = [{"name":"getPool","type":"function","stateMutability":"view","inputs":[{"name":"tokenA","type":"address"},{"name":"tokenB","type":"address"},{"name":"fee","type":"uint24"}],"outputs":[{"name":"","type":"address"}]}]
+
+def univ2_factory():
+    return w3.eth.contract(address=Web3.to_checksum_address("0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6"), abi=UNIV2_FACTORY_ABI)
+
+def univ3_factory():
+    return w3.eth.contract(address=Web3.to_checksum_address("0x33128a8fC17869897dcE68Ed026d694621f6FDfD"), abi=UNIV3_FACTORY_ABI)

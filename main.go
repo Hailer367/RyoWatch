@@ -3,9 +3,13 @@ package main
 import (
 	"bufio"
 	"context"
+	"flag"
+	"io"
+	"log"
 	"fmt"
 	"os"
 	"os/signal"
+	"time"
 	"strings"
 	"syscall"
 
@@ -47,7 +51,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	fmt.Printf("Ryowatch starting. dry_run=%v\n", config.DryRun)
+	logFile, _ := os.OpenFile("/tmp/opencode/watcher.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if logFile != nil {
+		mw := io.MultiWriter(os.Stdout, logFile)
+		log.SetOutput(mw)
+		log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+	}
+	log.Printf("Ryowatch starting. dry_run=%v", config.DryRun)
 	fmt.Printf("Ryo contract: %s\n", config.RyoAddress)
 	fmt.Printf("Operator: %s\n", config.OperatorAddress)
 
@@ -77,6 +87,16 @@ func main() {
 		fmt.Println("\nshutting down...")
 		cancel()
 	}()
+
+	once := flag.Bool("once", false, "run a single scan and exit")
+	flag.Parse()
+
+	if *once {
+		start := time.Now()
+		n := w.ScanOnce(ctx, 0)
+		fmt.Printf("scan complete: attempted=%d round_time=%v\n", n, time.Since(start))
+		return
+	}
 
 	w.Run(ctx)
 	fmt.Println("stopped")

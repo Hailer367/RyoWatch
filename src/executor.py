@@ -56,7 +56,7 @@ def execute(route, amount_override=None, min_profit_raw=None):
     decimals = pools.token_decimals(route.asset)
     amt_raw = int(amt * (10 ** decimals))
     swaps = R.to_ryo_swaps(route)
-    mp = min_profit_raw if min_profit_raw is not None else int(route.min_profit * 1e18)
+    mp = min_profit_raw if min_profit_raw is not None else int(route.min_profit * (10 ** decimals))
 
     acct = _account()
     fn = chains.ryo.functions.execute(route.asset, amt_raw, swaps, mp)
@@ -65,7 +65,7 @@ def execute(route, amount_override=None, min_profit_raw=None):
         tx = fn.build_transaction({
             "from": acct.address,
             "nonce": chains.w3.eth.get_transaction_count(acct.address),
-            "gas": 600_000,
+            "gas": 1_000_000,
             "maxFeePerGas": chains.w3.eth.gas_price * 2,
             "maxPriorityFeePerGas": chains.w3.to_wei(1, "gwei"),
             "chainId": chains.w3.eth.chain_id,

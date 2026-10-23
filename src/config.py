@@ -49,6 +49,7 @@ OPERATOR_ADDRESS = os.getenv("OPERATOR_ADDRESS", "")
 
 # ---- Safety (the bot is the primary safety net; these are backstops) ----
 MAX_TRADE_SIZE = float(os.getenv("MAX_TRADE_SIZE", "1.0"))          # in units of the borrowed token
+POOL_DEPTH_FRACTION = float(os.getenv("POOL_DEPTH_FRACTION", "0.01"))
 MAX_GAS_PRICE_GWEI = int(os.getenv("MAX_GAS_PRICE_GWEI", "50"))
 MIN_PROFIT = float(os.getenv("MIN_PROFIT", "0.001"))                # minimum profit to execute
 SLIPPAGE_BPS = int(os.getenv("SLIPPAGE_BPS", "50"))                # 0.5% per hop
@@ -88,7 +89,7 @@ DEFAULT_ROUTES: List[Route] = [
     Route(
         name="weth-usdc-v3-v2",
         asset=WETH,
-        amount=5.0,
+        amount=1.0,
         hops=[
             Hop(dex="v3", router=UNISWAP_V3_ROUTER, token_in=WETH, token_out=USDC, fee=500),
             Hop(dex="v2", router=UNISWAP_V2_ROUTER, token_in=USDC, token_out=WETH, min_out=1),

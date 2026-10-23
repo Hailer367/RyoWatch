@@ -2,6 +2,7 @@ package rpc
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
@@ -49,29 +50,56 @@ func decodeAggregate3(raw []byte, n int) ([]Multicall3Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	// go-ethereum returns the tuple as a []interface{} whose first element is the result slice.
-	slice, ok := out[0].([]interface{})
-	if !ok {
+	if len(out) == 0 {
+		return nil, fmt.Errorf("empty multicall output")
+	}
+
+	// go-ethereum may return the result slice as []interface{}, a typed slice of
+	// anonymous structs, or a map. Use reflection to handle all cases robustly.
+	v := reflect.ValueOf(out[0])
+	if v.Kind() != reflect.Slice {
 		return nil, fmt.Errorf("unexpected multicall return type %T", out[0])
 	}
-	res := make([]Multicall3Result, len(slice))
-	for i, item := range slice {
-		m, ok := item.(map[string]interface{})
-		if !ok {
-			// try struct form
-			s, ok2 := item.(struct {
-				Success    bool
-				ReturnData []byte
-			})
-			if !ok2 {
-				return nil, fmt.Errorf("unexpected item type %T", item)
-			}
-			res[i] = Multicall3Result{Success: s.Success, ReturnData: s.ReturnData}
-			continue
+	res := make([]Multicall3Result, v.Len())
+	for i := 0; i < v.Len(); i++ {
+		item := v.Index(i)
+		// dereference pointer if needed
+		if item.Kind() == reflect.Ptr {
+			item = item.Elem()
 		}
-		succ, _ := m["Success"].(bool)
-		rd, _ := m["ReturnData"].([]byte)
-		res[i] = Multicall3Result{Success: succ, ReturnData: rd}
+		switch item.Kind() {
+		case reflect.Map:
+			m := item.Interface().(map[string]interface{})
+			succ, _ := m["Success"].(bool)
+			rd, _ := m["ReturnData"].([]byte)
+			res[i] = Multicall3Result{Success: succ, ReturnData: rd}
+		case reflect.Struct:
+			// fields named Success and ReturnData
+			succField := item.FieldByName("Success")
+			rdField := item.FieldByName("ReturnData")
+			succ := false
+			if succField.IsValid() {
+				succ = succField.Bool()
+			}
+			var rd []byte
+			if rdField.IsValid() {
+				if b, ok := rdField.Interface().([]byte); ok {
+					rd = b
+				} else if b, ok := rdField.Interface().([]uint8); ok {
+					rd = b
+				}
+			}
+			res[i] = Multicall3Result{Success: succ, ReturnData: rd}
+		default:
+			// try []interface{} element
+			if iface, ok := item.Interface().(map[string]interface{}); ok {
+				succ, _ := iface["Success"].(bool)
+				rd, _ := iface["ReturnData"].([]byte)
+				res[i] = Multicall3Result{Success: succ, ReturnData: rd}
+			} else {
+				return nil, fmt.Errorf("unexpected item type %T", item.Interface())
+			}
+		}
 	}
 	_ = n
 	_ = aggregate3Output{}

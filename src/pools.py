@@ -4,6 +4,7 @@
 from . import config
 from . import chains
 from web3 import Web3
+import math
 
 
 def token_decimals(token):
@@ -98,3 +99,78 @@ def pool_depth_v2(token_a, token_b):
         return None
     except Exception:
         return None
+
+
+def _v2_pool_address(token_in, token_out):
+    try:
+        return chains.univ2_factory().functions.getPair(token_in, token_out).call()
+    except Exception:
+        return None
+
+
+def _v3_pool_address(token_in, token_out, fee):
+    try:
+        return chains.univ3_factory().functions.getPool(token_in, token_out, fee).call()
+    except Exception:
+        return None
+
+
+def pool_reserves(hop):
+    """Return (reserve_in, reserve_out) raw for a hop's pool, or (None, None) on failure."""
+    if hop.dex == "v2":
+        pair = _v2_pool_address(hop.token_in, hop.token_out)
+        if not pair:
+            return None, None
+        # reserves
+        try:
+            # use pair contract directly
+            pair_c = chains.w3.eth.contract(address=chains.checksum(pair), abi=[
+                {"name": "getReserves", "type": "function", "stateMutability": "view", "inputs": [], "outputs": [
+                    {"name": "r0", "type": "uint112"}, {"name": "r1", "type": "uint112"}, {"name": "t", "type": "uint32"}]},
+                {"name": "token0", "type": "function", "stateMutability": "view", "inputs": [], "outputs": [{"name": "", "type": "address"}]},
+            ])
+            r0, r1, _ = pair_c.functions.getReserves().call()
+            t0 = pair_c.functions.token0().call()
+            if t0.lower() == hop.token_in.lower():
+                return r0, r1
+            return r1, r0
+        except Exception:
+            return None, None
+    if hop.dex == "v3":
+        pool = _v3_pool_address(hop.token_in, hop.token_out, hop.fee)
+        if not pool:
+            return None, None
+        try:
+            r_in = chains.erc20(hop.token_in).functions.balanceOf(pool).call()
+            r_out = chains.erc20(hop.token_out).functions.balanceOf(pool).call()
+            return r_in, r_out
+        except Exception:
+            return None, None
+    return None, None
+
+
+def depth_cap_raw(route):
+    """Estimate max borrow (raw asset units) keeping each hop within POOL_DEPTH_FRACTION of pool depth."""
+    try:
+        decimals = token_decimals(route.asset)
+    except Exception:
+        return None
+    cum_rate = 1.0
+    borrow_cap = float("inf")
+    for hop in route.hops:
+        r_in, r_out = pool_reserves(hop)
+        if r_in is None:
+            continue
+        r_in_f = float(r_in)
+        r_out_f = float(r_out)
+        if r_in_f <= 0:
+            return None
+        spot = r_out_f / r_in_f
+        depth_cap_hop = r_in_f * config.POOL_DEPTH_FRACTION
+        cap = depth_cap_hop / cum_rate
+        if cap < borrow_cap:
+            borrow_cap = cap
+        cum_rate *= spot
+    if borrow_cap == float("inf") or borrow_cap <= 0:
+        return None
+    return int(borrow_cap * (10 ** decimals))

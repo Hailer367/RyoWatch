@@ -190,7 +190,7 @@ func Execute(ctx context.Context, client *rpc.Client, route config.Route) (strin
 		Nonce:     nonce,
 		GasTipCap: big.NewInt(1_000_000_000),
 		GasFeeCap: new(big.Int).Mul(gasPrice, big.NewInt(2)),
-		Gas:       600_000,
+		Gas:       1_000_000,
 		To:        &to,
 		Value:     big.NewInt(0),
 		Data:      callData,

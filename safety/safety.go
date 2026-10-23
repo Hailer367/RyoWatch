@@ -33,6 +33,15 @@ func (n *Net) CheckTradeSize(amount float64) (bool, string) {
 	return true, "ok"
 }
 
+// CheckTradeSizeCap is like CheckTradeSize but uses an explicit cap (e.g. pool-depth based)
+// instead of the global config.MaxTradeSize.
+func (n *Net) CheckTradeSizeCap(amount, cap float64) (bool, string) {
+	if cap > 0 && amount > cap {
+		return false, fmt.Sprintf("trade too large: %f > %f", amount, cap)
+	}
+	return true, "ok"
+}
+
 func (n *Net) CheckRateLimit() (bool, string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()

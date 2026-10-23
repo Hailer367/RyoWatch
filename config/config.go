@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"math/big"
 	"os"
 	"strconv"
@@ -24,6 +25,8 @@ const (
 	SlipstreamQuoter = "0x254cF9E1E6e233aa1AC962CB9B05b2cfeAaE15b0"
 	SlipstreamFactory = "0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A"
 
+	UniswapV3Factory = "0x33128a8fC17869897dcE68Ed026d694621f6FDfD"
+
 	// Multicall3 — deployed at the same address on every EVM chain.
 	Multicall3 = "0xcA11bde05977b3631167028862bE2a173976CA11"
 )
@@ -46,7 +49,8 @@ var (
 	PollIntervalSec  float64 = 2.0
 	DryRun           bool    = true
 	// SimMargin: only simulate if off-chain profit exceeds minProfit by this factor.
-	SimMargin float64 = 1.5
+	SimMargin        float64 = 1.5
+	PoolDepthFraction float64 = 0.01
 	// SimRPCURL: separate RPC for simulate calls (use a local anvil fork for ~1ms latency).
 	SimRPCURL string
 )
@@ -129,7 +133,25 @@ func Load() error {
 	if v, err := strconv.ParseFloat(getenv("SIM_MARGIN", "1.5"), 64); err == nil {
 		SimMargin = v
 	}
+	if v, err := strconv.ParseFloat(getenv("POOL_DEPTH_FRACTION", "0.01"), 64); err == nil {
+		PoolDepthFraction = v
+	}
 	DryRun = getenv("DRY_RUN", "true") == "true"
+
+	if RPCURL == "" {
+		return fmt.Errorf("BASE_RPC_URL is required")
+	}
+	if RyoAddress != "" {
+		if len(RyoAddress) != 42 || RyoAddress[:2] != "0x" {
+			return fmt.Errorf("RYO_ADDRESS must be a 0x-prefixed 20-byte hex address")
+		}
+	}
+	if OperatorKey != "" && OperatorAddress == "" {
+		return fmt.Errorf("OPERATOR_ADDRESS required when OPERATOR_PRIVATE_KEY is set")
+	}
+	if OperatorAddress != "" && OperatorKey == "" && RyoAddress != "" {
+		// allowed for dry-run / read-only, but warn
+	}
 	return nil
 }
 
