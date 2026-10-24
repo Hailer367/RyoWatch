@@ -3,6 +3,7 @@ package watcher
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -14,34 +15,56 @@ import (
 )
 
 type Watcher struct {
-	client  *rpc.Client
-	safety  *safety.Net
-	routes  []config.Route
-	cache   *pools.BlockCache
-	pools   []string
-	scanMu  sync.Mutex
+	client     *rpc.Client
+	safety     *safety.Net
+	routes     []config.Route
+	cache      *pools.BlockCache
+	pools      []string
+	watched    []*pools.WatchedPool
+	poolRoutes map[string][]int
+	scanMu     sync.Mutex
+	lastScan   time.Time
 }
 
 func New(client *rpc.Client, routes []config.Route) *Watcher {
 	return &Watcher{client: client, safety: safety.New(), routes: routes, cache: pools.NewBlockCache()}
 }
 
-// ResolvePools discovers the on-chain pool addresses touched by the configured routes.
+// ResolvePools discovers the on-chain pools touched by the configured routes and
+// builds a pool -> route-index map for route-scoped scans.
 // Call this once a context is available (e.g. at startup) before subscribing to events.
 func (w *Watcher) ResolvePools(ctx context.Context) {
 	seen := make(map[string]bool)
-	for _, r := range w.routes {
-		for _, p := range pools.ResolveRoutePools(ctx, w.client, r) {
-			if !seen[p] {
-				seen[p] = true
-				w.pools = append(w.pools, p)
+	routeSets := make(map[string]map[int]bool)
+	for ri, r := range w.routes {
+		for _, info := range pools.ResolveRoutePoolInfos(ctx, w.client, r) {
+			if !seen[info.Address] {
+				seen[info.Address] = true
+				w.pools = append(w.pools, info.Address)
+				w.watched = append(w.watched, pools.NewWatchedPool(info))
 			}
+			if routeSets[info.Address] == nil {
+				routeSets[info.Address] = make(map[int]bool)
+			}
+			routeSets[info.Address][ri] = true
+		}
+	}
+	w.poolRoutes = make(map[string][]int, len(routeSets))
+	for addr, set := range routeSets {
+		for ri := range set {
+			w.poolRoutes[addr] = append(w.poolRoutes[addr], ri)
 		}
 	}
 }
 
 // ScanOnce runs one pass over all routes. Returns number of trades attempted.
 func (w *Watcher) ScanOnce(ctx context.Context, blockNum uint64) int {
+	return w.scanRoutes(ctx, blockNum, nil)
+}
+
+// scanRoutes runs one pass over the selected routes. A nil routeIndices means
+// "all routes". Non-nil indices are used for route-scoped event-driven scans.
+func (w *Watcher) scanRoutes(ctx context.Context, blockNum uint64, routeIndices []int) int {
 	attempted := 0
 
 	// Block-level cache: if the block hasn't changed, skip all RPC calls and reuse cached results.
@@ -53,10 +76,22 @@ func (w *Watcher) ScanOnce(ctx context.Context, blockNum uint64) int {
 	if !w.cache.ShouldRequote(blockNum) {
 		return 0
 	}
-	pools.ClearDirty()
-	pools.PrefetchBlockData(ctx, w.client, w.routes, blockNum)
 
-	for _, route := range w.routes {
+	selected := w.routes
+	if routeIndices != nil {
+		selected = make([]config.Route, 0, len(routeIndices))
+		for _, i := range routeIndices {
+			if i >= 0 && i < len(w.routes) {
+				selected = append(selected, w.routes[i])
+			}
+		}
+	}
+
+	pools.ClearDirty()
+	pools.PrefetchBlockData(ctx, w.client, selected, blockNum)
+	w.warmReserves(ctx, selected)
+
+	for _, route := range selected {
 		dec, derr := pools.TokenDecimals(ctx, w.client, route.Asset)
 		if derr != nil {
 			fmt.Printf("[%s] decimals error: %v\n", route.Name, derr)
@@ -153,35 +188,24 @@ func (w *Watcher) ScanOnce(ctx context.Context, blockNum uint64) int {
 	return attempted
 }
 
+// warmReserves populates the last-known-reserve map used by the event size
+// filter. It normally hits the caches filled by PrefetchBlockData, so it adds
+// little or no RPC cost.
+func (w *Watcher) warmReserves(ctx context.Context, routes []config.Route) {
+	for _, route := range routes {
+		for _, hop := range route.Hops {
+			_, _, _ = pools.PoolReserves(ctx, w.client, hop)
+		}
+	}
+}
+
 // Run subscribes to new blocks via WebSocket and scans on each new block.
 // Falls back to HTTP polling if the WebSocket is unavailable.
 func (w *Watcher) Run(ctx context.Context) {
 	w.ResolvePools(ctx)
-	if len(w.pools) > 0 {
-		fmt.Printf("watching %d pools for swap events\n", len(w.pools))
-		watched := make([]*pools.WatchedPool, len(w.pools))
-		for i, p := range w.pools {
-			watched[i] = pools.NewWatchedPool(p)
-		}
-		go pools.WatchSwapEvents(ctx, w.client, watched)
-		// Bridge WatchedPool dirty state into the global pools dirty flag.
-		go func() {
-			ticker := time.NewTicker(250 * time.Millisecond)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					for _, wp := range watched {
-						if wp.IsDirty() {
-							wp.ClearDirty()
-							pools.MarkDirty(wp.Address)
-						}
-					}
-				}
-			}
-		}()
+	if len(w.watched) > 0 {
+		fmt.Printf("watching %d pools for swap events\n", len(w.watched))
+		go pools.WatchSwapEvents(ctx, w.client, w.watched)
 	}
 
 	// Try WebSocket subscription first.
@@ -207,7 +231,8 @@ func (w *Watcher) Run(ctx context.Context) {
 					fmt.Printf("pre-warm ping failed: %v\n", err)
 				}
 				ws, http := w.client.Stats()
-				fmt.Printf("stats: ws_calls=%d http_calls=%d\n", ws, http)
+				seen, ignored := pools.EventStats()
+				fmt.Printf("stats: ws_calls=%d http_calls=%d swaps_seen=%d swaps_ignored=%d\n", ws, http, seen, ignored)
 			}
 		}
 	}()
@@ -222,14 +247,67 @@ func (w *Watcher) Run(ctx context.Context) {
 				w.runPolling(ctx)
 				return
 			}
-			fmt.Printf("new block %d\n", header.Number.Uint64())
+			block := header.Number.Uint64()
+			// Only scan when a watched pool actually traded, or when the fallback
+			// interval has elapsed. This avoids paying for a full quote/simulate
+			// pass on every quiet block.
+			dirtyRoutes := w.collectDirtyRoutes()
+			fallback := w.fallbackDue()
+			if len(dirtyRoutes) == 0 && !fallback {
+				fmt.Printf("new block %d (quiet; skipped)\n", block)
+				continue
+			}
+			if fallback {
+				dirtyRoutes = nil // nil = all routes
+				fmt.Printf("new block %d (fallback full scan)\n", block)
+			} else {
+				fmt.Printf("new block %d (scanning %d affected route(s))\n", block, len(dirtyRoutes))
+			}
 			w.scanMu.Lock()
 			start := time.Now()
-			w.ScanOnce(ctx, header.Number.Uint64())
+			w.scanRoutes(ctx, block, dirtyRoutes)
+			w.lastScan = time.Now()
 			fmt.Printf("round time: %v\n", time.Since(start))
 			w.scanMu.Unlock()
 		}
 	}
+}
+
+// fallbackDue reports whether a full scan should run because the fallback
+// interval has elapsed (or no scan has happened yet).
+func (w *Watcher) fallbackDue() bool {
+	if w.lastScan.IsZero() {
+		return true
+	}
+	fallback := time.Duration(config.ScanFallbackSeconds * float64(time.Second))
+	return time.Since(w.lastScan) >= fallback
+}
+
+// collectDirtyRoutes snapshots the dirty pools, clears their flags, and returns
+// the sorted route indices affected by those pools. Events that arrive during
+// the subsequent scan set the flags again for the next block.
+func (w *Watcher) collectDirtyRoutes() []int {
+	set := make(map[int]bool)
+	any := false
+	for _, wp := range w.watched {
+		if !wp.IsDirty() {
+			continue
+		}
+		any = true
+		wp.ClearDirty()
+		for _, ri := range w.poolRoutes[wp.Address] {
+			set[ri] = true
+		}
+	}
+	if !any {
+		return nil
+	}
+	out := make([]int, 0, len(set))
+	for ri := range set {
+		out = append(out, ri)
+	}
+	sort.Ints(out)
+	return out
 }
 
 func (w *Watcher) runPolling(ctx context.Context) {
@@ -243,6 +321,7 @@ func (w *Watcher) runPolling(ctx context.Context) {
 			w.scanMu.Lock()
 			start := time.Now()
 			w.ScanOnce(ctx, 0)
+			w.lastScan = time.Now()
 			fmt.Printf("round time: %v\n", time.Since(start))
 			w.scanMu.Unlock()
 		}

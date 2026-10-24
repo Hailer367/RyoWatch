@@ -85,7 +85,7 @@ class Route:
     asset: str                    # borrowed token (must be first tokenIn and last tokenOut)
     amount: float                 # amount to borrow, in token units
     hops: List[Hop] = field(default_factory=list)
-    min_profit: float = 0.01
+    min_profit: float = 0.001
 
 
 # ---- Default routes (WETH <-> USDC) ----

@@ -9,23 +9,23 @@ import (
 
 // ---- Base mainnet addresses (verified on-chain) ----
 const (
-	BalancerVault  = "0xBA12222222228d8Ba445958a75a0704d566BF2C8"
-	WETH           = "0x4200000000000000000000000000000000000006"
-	USDC           = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
-	cbBTC          = "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf"
-	AERO           = "0x940181a94A35A4569E4529A3CDfB74e38FD98631"
-	EURC           = "0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42"
+	BalancerVault = "0xBA12222222228d8Ba445958a75a0704d566BF2C8"
+	WETH          = "0x4200000000000000000000000000000000000006"
+	USDC          = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+	cbBTC         = "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf"
+	AERO          = "0x940181a94A35A4569E4529A3CDfB74e38FD98631"
+	EURC          = "0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42"
 
-	UniswapV3Router = "0x2626664c2603336E57B271c5C0b26F421741e481"
-	UniswapV3Quoter = "0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a"
-	UniswapV2Router = "0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24"
+	UniswapV3Router  = "0x2626664c2603336E57B271c5C0b26F421741e481"
+	UniswapV3Quoter  = "0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a"
+	UniswapV2Router  = "0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24"
 	UniswapV2Factory = "0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6"
 
 	AerodromeRouter  = "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43"
 	AerodromeFactory = "0x420DD381b31aEf6683db6B902084cB0FFECe40Da"
 
-	SlipstreamRouter = "0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5"
-	SlipstreamQuoter = "0x254cF9E1E6e233aa1AC962CB9B05b2cfeAaE15b0"
+	SlipstreamRouter  = "0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5"
+	SlipstreamQuoter  = "0x254cF9E1E6e233aa1AC962CB9B05b2cfeAaE15b0"
 	SlipstreamFactory = "0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A"
 
 	UniswapV3Factory = "0x33128a8fC17869897dcE68Ed026d694621f6FDfD"
@@ -44,15 +44,22 @@ const (
 
 // ---- Safety defaults ----
 var (
-	MaxTradeSize     float64 = 1.0
-	MaxGasPriceGwei  int64   = 50
-	MinProfit        float64 = 0.001
-	SlippageBps      int64   = 50
-	CircuitBreakerN  int     = 3
-	PollIntervalSec  float64 = 2.0
-	DryRun           bool    = true
+	MaxTradeSize    float64 = 1.0
+	MaxGasPriceGwei int64   = 50
+	MinProfit       float64 = 0.001
+	SlippageBps     int64   = 50
+	CircuitBreakerN int     = 3
+	PollIntervalSec float64 = 2.0
+	// ScanFallbackSeconds forces a full scan if no watched pool has traded for this long.
+	// This keeps the bot responsive to moves outside the watched pools while letting it
+	// skip quiet blocks (no Swap events) and save RPC credits.
+	ScanFallbackSeconds float64 = 30.0
+	// MinSwapDepthFraction ignores swap events smaller than this fraction of the
+	// affected pool's reserves. 0 disables size filtering.
+	MinSwapDepthFraction float64 = 0.0001
+	DryRun               bool    = true
 	// SimMargin: only simulate if off-chain profit exceeds minProfit by this factor.
-	SimMargin        float64 = 1.5
+	SimMargin         float64 = 1.5
 	PoolDepthFraction float64 = 0.01
 	// SimRPCURL: separate RPC for simulate calls (use a local anvil fork for ~1ms latency).
 	SimRPCURL string
@@ -60,22 +67,22 @@ var (
 
 // ---- RPC ----
 var (
-	RPCURL           string
-	RyoAddress       string
-	OperatorAddress  string
-	OperatorKey      string
+	RPCURL          string
+	RyoAddress      string
+	OperatorAddress string
+	OperatorKey     string
 )
 
 // ---- Route definition ----
 type Hop struct {
-	Dex        string
-	Router     string
-	TokenIn    string
-	TokenOut   string
-	Fee        uint32
-	Stable     bool
+	Dex         string
+	Router      string
+	TokenIn     string
+	TokenOut    string
+	Fee         uint32
+	Stable      bool
 	TickSpacing int32
-	MinOut     uint64
+	MinOut      uint64
 }
 
 type Route struct {
@@ -162,6 +169,12 @@ func Load() error {
 	}
 	if v, err := strconv.ParseFloat(getenv("POLL_INTERVAL_SECONDS", "2.0"), 64); err == nil {
 		PollIntervalSec = v
+	}
+	if v, err := strconv.ParseFloat(getenv("SCAN_FALLBACK_SECONDS", "30"), 64); err == nil {
+		ScanFallbackSeconds = v
+	}
+	if v, err := strconv.ParseFloat(getenv("MIN_SWAP_DEPTH_FRACTION", "0.0001"), 64); err == nil {
+		MinSwapDepthFraction = v
 	}
 	if v, err := strconv.ParseFloat(getenv("SIM_MARGIN", "1.5"), 64); err == nil {
 		SimMargin = v

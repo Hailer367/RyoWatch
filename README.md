@@ -125,12 +125,26 @@ Key `.env` variables:
 - `MAX_TRADE_SIZE`, `MAX_GAS_PRICE_GWEI`, `MIN_PROFIT`, `SLIPPAGE_BPS` — safety limits.
 - `CIRCUIT_BREAKER_FAILURES` — pause after this many consecutive failures.
 - `POLL_INTERVAL_SECONDS` — polling interval when WebSocket is unavailable.
+- `SCAN_FALLBACK_SECONDS` — force a full scan if no watched pool traded for this long
+  (default 30). Quiet blocks are skipped to save RPC credits.
+- `MIN_SWAP_DEPTH_FRACTION` — ignore swaps smaller than this fraction of pool reserves
+  (default `0.0001` = 0.01%). Set `0` to disable size filtering.
 - `DRY_RUN` — `true` by default. Simulates only, never sends a transaction.
 
 ## How it stays fast and cheap
 
 - **WebSocket primary, HTTP fallback.** Subscribes to `newHeads` on Alchemy; wakes the
   instant a block lands. Falls back to HTTP polling if the WebSocket drops.
+- **Event-driven scans.** Also subscribes to `Swap` logs on the watched pools. On a new
+  block the bot only quotes/simulates if a watched pool traded since the last scan;
+  otherwise the block is skipped. `SCAN_FALLBACK_SECONDS` (default 30) forces a full
+  scan periodically so moves outside the watched pools are still caught.
+- **Size filtering.** A swap is ignored unless it is at least
+  `MIN_SWAP_DEPTH_FRACTION` (default 0.0001 = 0.01%) of the affected pool's reserves.
+  Unknown events or missing reserves fail open, so the bot never misses a real move
+  because of a parsing gap.
+- **Route-scoped scans.** When a pool trades, only the routes that contain that pool
+  are re-quoted.
 - **Multicall3 batching.** All pool quotes for a block go through one `eth_call` to
   Multicall3 instead of N separate calls.
 - **Parallel evaluation.** Routes are quoted concurrently.

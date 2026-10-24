@@ -6,14 +6,17 @@ import (
 	"math"
 	"math/big"
 	"strings"
-	"time"
 	"sync"
+	"sync/atomic"
+	"time"
 
+	"github.com/Hailer367/Ryowatch/config"
+	"github.com/Hailer367/Ryowatch/rpc"
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/Hailer367/Ryowatch/config"
-	"github.com/Hailer367/Ryowatch/rpc"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
 )
 
 // ---- ABIs ----
@@ -40,15 +43,15 @@ const (
 )
 
 var (
-	erc20ABIparsed    abi.ABI
-	univ2RouterParsed abi.ABI
-	univ3QuoterParsed abi.ABI
-	aerodromeParsed   abi.ABI
-	slipstreamParsed  abi.ABI
-	univ2PairParsed   abi.ABI
-	univ2FactoryParsed abi.ABI
-	univ3FactoryParsed abi.ABI
-	aerodromeFactoryParsed abi.ABI
+	erc20ABIparsed          abi.ABI
+	univ2RouterParsed       abi.ABI
+	univ3QuoterParsed       abi.ABI
+	aerodromeParsed         abi.ABI
+	slipstreamParsed        abi.ABI
+	univ2PairParsed         abi.ABI
+	univ2FactoryParsed      abi.ABI
+	univ3FactoryParsed      abi.ABI
+	aerodromeFactoryParsed  abi.ABI
 	slipstreamFactoryParsed abi.ABI
 )
 
@@ -112,13 +115,13 @@ type cacheEntry struct {
 }
 
 var (
-	cacheMu     sync.Mutex
-	blockCache  = make(map[string]*cacheEntry)
-	lastBlock   uint64
-	dirtyMu     sync.Mutex
-	anyDirty    bool
+	cacheMu    sync.Mutex
+	blockCache = make(map[string]*cacheEntry)
+	lastBlock  uint64
+	dirtyMu    sync.Mutex
+	anyDirty   bool
 
-	reserveMu   sync.Mutex
+	reserveMu    sync.Mutex
 	reserveCache = make(map[string]struct {
 		rIn  *big.Int
 		rOut *big.Int
@@ -136,7 +139,7 @@ var (
 
 	v3Mu    sync.Mutex
 	v3Cache = make(map[string]struct {
-		rIn *big.Int
+		rIn  *big.Int
 		rOut *big.Int
 		err  error
 	})
@@ -147,11 +150,52 @@ var (
 	poolAddrMu    sync.Mutex
 	poolAddrCache = make(map[string]string)
 
-	v2PairMu    sync.Mutex
-	v2PairCache = make(map[string]string) // tokenIn:tokenOut -> pair address (permanent)
-	v2Token0Mu  sync.Mutex
+	v2PairMu      sync.Mutex
+	v2PairCache   = make(map[string]string) // tokenIn:tokenOut -> pair address (permanent)
+	v2Token0Mu    sync.Mutex
 	v2Token0Cache = make(map[string]string) // pair addr -> token0 (permanent)
+
+	// lastReserves holds the most recent (reserveIn, reserveOut) seen for a pool,
+	// keyed by pool:tokenIn:tokenOut. Used by the event-size filter without
+	// making an RPC call inside the event handler.
+	lastReserveMu sync.Mutex
+	lastReserves  = make(map[string]struct {
+		rIn  *big.Int
+		rOut *big.Int
+	})
 )
+
+func reserveKey(poolAddr, tokenIn, tokenOut string) string {
+	return poolAddr + ":" + strings.ToLower(tokenIn) + ":" + strings.ToLower(tokenOut)
+}
+
+// storeLastReserves records reserves for both orientations of a pool.
+func storeLastReserves(poolAddr, tokenIn, tokenOut string, rIn, rOut *big.Int) {
+	if poolAddr == "" || rIn == nil || rOut == nil {
+		return
+	}
+	lastReserveMu.Lock()
+	lastReserves[reserveKey(poolAddr, tokenIn, tokenOut)] = struct {
+		rIn  *big.Int
+		rOut *big.Int
+	}{rIn: new(big.Int).Set(rIn), rOut: new(big.Int).Set(rOut)}
+	lastReserves[reserveKey(poolAddr, tokenOut, tokenIn)] = struct {
+		rIn  *big.Int
+		rOut *big.Int
+	}{rIn: new(big.Int).Set(rOut), rOut: new(big.Int).Set(rIn)}
+	lastReserveMu.Unlock()
+}
+
+// LastReserves returns the most recently cached reserves for a pool orientation.
+func LastReserves(poolAddr, tokenIn, tokenOut string) (*big.Int, *big.Int, bool) {
+	lastReserveMu.Lock()
+	defer lastReserveMu.Unlock()
+	e, ok := lastReserves[reserveKey(poolAddr, tokenIn, tokenOut)]
+	if !ok {
+		return nil, nil, false
+	}
+	return new(big.Int).Set(e.rIn), new(big.Int).Set(e.rOut), true
+}
 
 // MarkDirty marks the global quote cache as stale because a watched pool traded.
 // The pool address is retained for logging/debugging but invalidation is global:
@@ -192,7 +236,7 @@ func ClearDirty() {
 
 	v3Mu.Lock()
 	v3Cache = make(map[string]struct {
-		rIn *big.Int
+		rIn  *big.Int
 		rOut *big.Int
 		err  error
 	})
@@ -242,8 +286,8 @@ func QuoteHop(ctx context.Context, client *rpc.Client, hop config.Hop, amountIn 
 	switch hop.Dex {
 	case "v3":
 		if blockNum == 0 {
-		blockNum = currentBlockNumber(ctx, client)
-	}
+			blockNum = currentBlockNumber(ctx, client)
+		}
 		qKey := hop.TokenIn + ":" + hop.TokenOut + ":" + fmt.Sprintf("%d", hop.Fee) + ":" + amountIn.String() + ":" + fmt.Sprintf("%d", blockNum)
 		v3QuoteMu.Lock()
 		if cached, ok := v3QuoteCache[qKey]; ok {
@@ -291,10 +335,10 @@ func QuoteHop(ctx context.Context, client *rpc.Client, hop config.Hop, amountIn 
 
 	case "aerodrome":
 		type route struct {
-			From     common.Address `abi:"from"`
-			To       common.Address `abi:"to"`
-			Stable   bool           `abi:"stable"`
-			Factory  common.Address `abi:"factory"`
+			From    common.Address `abi:"from"`
+			To      common.Address `abi:"to"`
+			Stable  bool           `abi:"stable"`
+			Factory common.Address `abi:"factory"`
 		}
 		routes := []route{{From: common.HexToAddress(hop.TokenIn), To: common.HexToAddress(hop.TokenOut), Stable: hop.Stable, Factory: common.HexToAddress("0x0000000000000000000000000000000000000000")}}
 		data, perr := aerodromeParsed.Pack("getAmountsOut", amountIn, routes)
@@ -657,6 +701,68 @@ func ResolveRoutePools(ctx context.Context, client *rpc.Client, route config.Rou
 	return out
 }
 
+// PoolInfo describes one watched pool so event decoding and route-scoped scans
+// know what a log belongs to.
+type PoolInfo struct {
+	Address     string
+	Dex         string
+	Token0      string
+	Token1      string
+	Fee         uint32
+	Stable      bool
+	TickSpacing int32
+}
+
+// ResolveRoutePoolInfos returns the unique pools touched by a route, with enough
+// metadata to decode their Swap events.
+func ResolveRoutePoolInfos(ctx context.Context, client *rpc.Client, route config.Route) []PoolInfo {
+	seen := make(map[string]bool)
+	var out []PoolInfo
+	add := func(addr, dex, tokenA, tokenB string, fee uint32, stable bool, tickSpacing int32) {
+		if addr == "" || addr == "0x0000000000000000000000000000000000000000" {
+			return
+		}
+		if seen[addr] {
+			return
+		}
+		seen[addr] = true
+		t0, t1 := tokenA, tokenB
+		if strings.ToLower(tokenA) > strings.ToLower(tokenB) {
+			t0, t1 = tokenB, tokenA
+		}
+		out = append(out, PoolInfo{
+			Address:     addr,
+			Dex:         dex,
+			Token0:      t0,
+			Token1:      t1,
+			Fee:         fee,
+			Stable:      stable,
+			TickSpacing: tickSpacing,
+		})
+	}
+	for _, hop := range route.Hops {
+		switch hop.Dex {
+		case "v2":
+			if p, err := getV2Pair(ctx, client, hop.TokenIn, hop.TokenOut); err == nil {
+				add(p, hop.Dex, hop.TokenIn, hop.TokenOut, hop.Fee, hop.Stable, hop.TickSpacing)
+			}
+		case "v3":
+			if p, err := GetV3Pool(ctx, client, hop.TokenIn, hop.TokenOut, hop.Fee); err == nil {
+				add(p, hop.Dex, hop.TokenIn, hop.TokenOut, hop.Fee, hop.Stable, hop.TickSpacing)
+			}
+		case "aerodrome":
+			if p, err := GetAerodromePool(ctx, client, hop.TokenIn, hop.TokenOut, hop.Stable); err == nil {
+				add(p, hop.Dex, hop.TokenIn, hop.TokenOut, hop.Fee, hop.Stable, hop.TickSpacing)
+			}
+		case "slipstream":
+			if p, err := GetSlipstreamPool(ctx, client, hop.TokenIn, hop.TokenOut, hop.TickSpacing); err == nil {
+				add(p, hop.Dex, hop.TokenIn, hop.TokenOut, hop.Fee, hop.Stable, hop.TickSpacing)
+			}
+		}
+	}
+	return out
+}
+
 // erc20Balance reads an ERC-20 balanceOf for a holder.
 func erc20Balance(ctx context.Context, client *rpc.Client, token, holder string) (*big.Int, error) {
 	data, err := erc20ABIparsed.Pack("balanceOf", common.HexToAddress(holder))
@@ -744,6 +850,7 @@ func PoolReserves(ctx context.Context, client *rpc.Client, hop config.Hop) (*big
 		if err != nil {
 			return nil, nil, err
 		}
+		storeLastReserves(poolAddr, hop.TokenIn, hop.TokenOut, rIn, rOut)
 		return new(big.Int).Set(rIn), new(big.Int).Set(rOut), nil
 	}
 	reserveMu.Unlock()
@@ -783,7 +890,7 @@ func PoolReserves(ctx context.Context, client *rpc.Client, hop config.Hop) (*big
 		}
 	case "v3", "slipstream":
 		blockNum := currentBlockNumber(ctx, client)
-		key := poolAddr + ":" + fmt.Sprintf("%d", blockNum)
+		key := poolAddr + ":" + hop.TokenIn + ":" + hop.TokenOut + ":" + fmt.Sprintf("%d", blockNum)
 		v3Mu.Lock()
 		if cached, ok := v3Cache[key]; ok {
 			ri, ro, rerr := cached.rIn, cached.rOut, cached.err
@@ -846,6 +953,7 @@ func PoolReserves(ctx context.Context, client *rpc.Client, hop config.Hop) (*big
 	if rIn == nil || rOut == nil {
 		return nil, nil, fmt.Errorf("no reserves for %s", poolAddr)
 	}
+	storeLastReserves(poolAddr, hop.TokenIn, hop.TokenOut, rIn, rOut)
 	return new(big.Int).Set(rIn), new(big.Int).Set(rOut), nil
 }
 
@@ -895,7 +1003,7 @@ func DepthCapRaw(ctx context.Context, client *rpc.Client, route config.Route) (*
 func PrefetchBlockData(ctx context.Context, client *rpc.Client, routes []config.Route, blockNum uint64) {
 	// 1. Resolve pool addresses (cached permanently; one-time fetch if missing).
 	type v3pool struct {
-		addr string
+		addr   string
 		tokens [2]string // tokenIn, tokenOut for balance reads (use first hop's tokens)
 	}
 	v3Pools := make(map[string]bool) // poolAddr -> seen
@@ -969,14 +1077,15 @@ func PrefetchBlockData(ctx context.Context, client *rpc.Client, routes []config.
 
 	// 2. Build multicall entries.
 	type entry struct {
-		kind      string
-		poolAddr  string
-		tokIn     string
-		tokOut    string
-		fee       uint32
-		amountIn  *big.Int
-		routeIdx  int
-		pairKey   string
+		kind     string
+		poolAddr string
+		tokIn    string
+		tokOut   string
+		fee      uint32
+		amountIn *big.Int
+		routeIdx int
+		pairKey  string
+		pairAddr string
 	}
 	var entries []entry
 	var calls []rpc.MulticallCall
@@ -992,11 +1101,11 @@ func PrefetchBlockData(ctx context.Context, client *rpc.Client, routes []config.
 		// tokenIn balance
 		d1, _ := erc20ABIparsed.Pack("balanceOf", common.HexToAddress(addr))
 		calls = append(calls, rpc.MulticallCall{Target: common.HexToAddress(toks[0]), Calldata: d1})
-		entries = append(entries, entry{kind: "v3bal", poolAddr: addr, tokIn: toks[0], tokOut: toks[1], /* rIn */})
+		entries = append(entries, entry{kind: "v3bal", poolAddr: addr, tokIn: toks[0], tokOut: toks[1] /* rIn */})
 		// tokenOut balance
 		d2, _ := erc20ABIparsed.Pack("balanceOf", common.HexToAddress(addr))
 		calls = append(calls, rpc.MulticallCall{Target: common.HexToAddress(toks[1]), Calldata: d2})
-		entries = append(entries, entry{kind: "v3bal", poolAddr: addr, tokIn: toks[0], tokOut: toks[1], /* rOut */})
+		entries = append(entries, entry{kind: "v3bal", poolAddr: addr, tokIn: toks[0], tokOut: toks[1] /* rOut */})
 	}
 
 	// V2 reserves (1 getReserves per unique pair) — batched.
@@ -1030,7 +1139,7 @@ func PrefetchBlockData(ctx context.Context, client *rpc.Client, routes []config.
 		}
 		data, _ := univ2PairParsed.Pack("getReserves")
 		calls = append(calls, rpc.MulticallCall{Target: common.HexToAddress(pairAddr), Calldata: data})
-		entries = append(entries, entry{kind: "v2res", pairKey: pk[0] + ":" + pk[1]})
+		entries = append(entries, entry{kind: "v2res", pairKey: pk[0] + ":" + pk[1], pairAddr: pairAddr})
 	}
 
 	// V3 hop-0 quotes
@@ -1092,15 +1201,6 @@ func PrefetchBlockData(ctx context.Context, client *rpc.Client, routes []config.
 	}
 
 	// Handle v3bal results: pair them up (2 per pool).
-	// Re-iterate to populate v3Cache. We need to group consecutive pairs.
-	idx := 0
-	for _, addr := range v3PoolAddrs {
-		toks := v3PoolTokens[addr]
-		// find the two entries for this pool in results (they're contiguous in the order we added)
-		// We added balances in order of v3PoolAddrs, 2 per pool. So compute offset.
-		_ = toks
-	}
-	// Simpler: walk results again, pairing v3bal entries.
 	// Collect v3bal result values in order.
 	var balVals []*big.Int
 	var balErrs []error
@@ -1141,29 +1241,92 @@ func PrefetchBlockData(ctx context.Context, client *rpc.Client, routes []config.
 		} else if err2 != nil {
 			err = err2
 		}
+		toks := v3PoolTokens[addr]
 		v3Mu.Lock()
-		key := addr + ":" + fmt.Sprintf("%d", blockNum)
-		if err != nil {
-			v3Cache[key] = struct {
-				rIn  *big.Int
-				rOut *big.Int
-				err  error
-			}{err: err}
-		} else {
-			v3Cache[key] = struct {
-				rIn  *big.Int
-				rOut *big.Int
-				err  error
-			}{rIn: new(big.Int).Set(rIn), rOut: new(big.Int).Set(rOut), err: nil}
+		// Store both orientations so reversed hops hit the cache.
+		for _, kv := range []struct {
+			key  string
+			rin  *big.Int
+			rout *big.Int
+		}{
+			{addr + ":" + toks[0] + ":" + toks[1] + ":" + fmt.Sprintf("%d", blockNum), rIn, rOut},
+			{addr + ":" + toks[1] + ":" + toks[0] + ":" + fmt.Sprintf("%d", blockNum), rOut, rIn},
+		} {
+			if err != nil {
+				v3Cache[kv.key] = struct {
+					rIn  *big.Int
+					rOut *big.Int
+					err  error
+				}{err: err}
+			} else {
+				v3Cache[kv.key] = struct {
+					rIn  *big.Int
+					rOut *big.Int
+					err  error
+				}{rIn: new(big.Int).Set(kv.rin), rOut: new(big.Int).Set(kv.rout), err: nil}
+			}
 		}
 		v3Mu.Unlock()
+		if err == nil {
+			storeLastReserves(addr, toks[0], toks[1], rIn, rOut)
+		}
 		bi += 2
 	}
 
-	// V2 reserves: already cached by v2Reserves calls above (which fetched pair+reserves+token0).
-	// Those were individual calls, not batched. To batch them too, we'd need to restructure.
-	// For now, v2Reserves already populated the cache; leave as is.
-	_ = idx
+	// V2 reserves: process the batched getReserves results so PoolReserves can
+	// hit the cache instead of making individual calls.
+	for i, res := range results {
+		if i >= len(entries) {
+			break
+		}
+		e := entries[i]
+		if e.kind != "v2res" || !res.Success || len(res.ReturnData) < 64 {
+			continue
+		}
+		out, uerr := univ2PairParsed.Unpack("getReserves", res.ReturnData)
+		if uerr != nil {
+			continue
+		}
+		r0 := out[0].(*big.Int)
+		r1 := out[1].(*big.Int)
+		v2Token0Mu.Lock()
+		token0 := v2Token0Cache[e.pairAddr]
+		v2Token0Mu.Unlock()
+		if token0 == "" {
+			continue
+		}
+		parts := strings.SplitN(e.pairKey, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		tokenIn, tokenOut := parts[0], parts[1]
+		var rIn, rOut *big.Int
+		if strings.EqualFold(token0, tokenIn) {
+			rIn, rOut = r0, r1
+		} else {
+			rIn, rOut = r1, r0
+		}
+		storeLastReserves(e.pairAddr, tokenIn, tokenOut, rIn, rOut)
+		blockKey := fmt.Sprintf("%d", blockNum)
+		v2Mu.Lock()
+		v2Cache[tokenIn+":"+tokenOut+":"+blockKey] = struct {
+			pair   string
+			token0 string
+			r0     *big.Int
+			r1     *big.Int
+			err    error
+		}{pair: e.pairAddr, token0: token0, r0: new(big.Int).Set(r0), r1: new(big.Int).Set(r1)}
+		v2Cache[tokenOut+":"+tokenIn+":"+blockKey] = struct {
+			pair   string
+			token0 string
+			r0     *big.Int
+			r1     *big.Int
+			err    error
+		}{pair: e.pairAddr, token0: token0, r0: new(big.Int).Set(r0), r1: new(big.Int).Set(r1)}
+		v2Mu.Unlock()
+	}
+
+	// V2 reserves are now cached above from the batched getReserves results.
 }
 
 // EvaluateRoute walks a route hop by hop and returns (finalAmount, profit) or error.
@@ -1213,12 +1376,13 @@ type RouteResult struct {
 // ---- Event-driven re-quoting ----
 type WatchedPool struct {
 	Address string
+	Info    PoolInfo
 	Dirty   bool
 	mu      sync.Mutex
 }
 
-func NewWatchedPool(addr string) *WatchedPool {
-	return &WatchedPool{Address: addr}
+func NewWatchedPool(info PoolInfo) *WatchedPool {
+	return &WatchedPool{Address: info.Address, Info: info}
 }
 
 func (wp *WatchedPool) SetDirty() {
@@ -1239,12 +1403,102 @@ func (wp *WatchedPool) ClearDirty() {
 	wp.mu.Unlock()
 }
 
-// WatchSwapEvents subscribes to Swap events on the given pool addresses.
-// Alchemy filters by address + event topic, so we only receive events for pools
-// we care about — minimal credit usage.
+// Swap event topics for the pool types we watch.
+var (
+	swapV2Topic   = crypto.Keccak256Hash([]byte("Swap(address,uint256,uint256,uint256,uint256,address)"))
+	swapAeroTopic = crypto.Keccak256Hash([]byte("Swap(address,address,uint256,uint256,uint256,uint256)"))
+	swapV3Topic   = crypto.Keccak256Hash([]byte("Swap(address,address,int256,int256,uint160,uint128,int24)"))
+
+	swapEventsSeen    atomic.Int64
+	swapEventsIgnored atomic.Int64
+)
+
+// EventStats returns how many swap events were seen and how many were filtered
+// out by the size filter.
+func EventStats() (seen, ignored int64) {
+	return swapEventsSeen.Load(), swapEventsIgnored.Load()
+}
+
+// signedWord decodes a 32-byte two's-complement word.
+func signedWord(b []byte) *big.Int {
+	v := new(big.Int).SetBytes(b)
+	if len(b) == 32 && b[0]&0x80 != 0 {
+		v.Sub(v, new(big.Int).Lsh(big.NewInt(1), 256))
+	}
+	return v
+}
+
+// decodeSwapInputs extracts the input amounts (token0, token1) from a Swap log.
+// ok=false means "unknown event shape"; callers should fail open and scan anyway.
+func decodeSwapInputs(log types.Log, info PoolInfo) (in0, in1 *big.Int, ok bool) {
+	if len(log.Topics) == 0 {
+		return nil, nil, false
+	}
+	switch log.Topics[0] {
+	case swapV2Topic, swapAeroTopic:
+		// amount0In, amount1In, amount0Out, amount1Out
+		if len(log.Data) < 128 {
+			return nil, nil, false
+		}
+		return new(big.Int).SetBytes(log.Data[0:32]),
+			new(big.Int).SetBytes(log.Data[32:64]), true
+	case swapV3Topic:
+		// amount0, amount1, sqrtPriceX96, liquidity, tick
+		if len(log.Data) < 64 {
+			return nil, nil, false
+		}
+		a0 := signedWord(log.Data[0:32])
+		a1 := signedWord(log.Data[32:64])
+		in0 = new(big.Int)
+		in1 = new(big.Int)
+		if a0.Sign() > 0 {
+			in0 = a0
+		}
+		if a1.Sign() > 0 {
+			in1 = a1
+		}
+		return in0, in1, true
+	}
+	return nil, nil, false
+}
+
+func ratioAtLeast(amount, reserve *big.Int, fraction float64) bool {
+	if amount == nil || reserve == nil || amount.Sign() <= 0 || reserve.Sign() <= 0 {
+		return false
+	}
+	af := new(big.Float).SetInt(amount)
+	rf := new(big.Float).SetInt(reserve)
+	ratio := new(big.Float).Quo(af, rf)
+	v, _ := ratio.Float64()
+	return v >= fraction
+}
+
+// shouldMarkDirty applies the size filter. Any uncertainty (unknown event,
+// missing reserves) fails open so we never miss a real move.
+func shouldMarkDirty(log types.Log, info PoolInfo) bool {
+	fraction := config.MinSwapDepthFraction
+	if fraction <= 0 {
+		return true
+	}
+	in0, in1, ok := decodeSwapInputs(log, info)
+	if !ok {
+		return true
+	}
+	r0, r1, ok := LastReserves(info.Address, info.Token0, info.Token1)
+	if !ok || r0 == nil || r1 == nil {
+		return true
+	}
+	return ratioAtLeast(in0, r0, fraction) || ratioAtLeast(in1, r1, fraction)
+}
+
+// WatchSwapEvents subscribes to logs on the given pool addresses. It only marks
+// a pool dirty when the swap is large enough relative to that pool's reserves
+// (config.MinSwapDepthFraction); dust trades are ignored.
 func WatchSwapEvents(ctx context.Context, client *rpc.Client, pools []*WatchedPool) {
+	byAddr := make(map[string]*WatchedPool, len(pools))
 	addresses := make([]common.Address, len(pools))
 	for i, p := range pools {
+		byAddr[strings.ToLower(p.Address)] = p
 		addresses[i] = common.HexToAddress(p.Address)
 	}
 	q := ethereum.FilterQuery{
@@ -1264,11 +1518,19 @@ func WatchSwapEvents(ctx context.Context, client *rpc.Client, pools []*WatchedPo
 			if !ok {
 				return
 			}
-			for _, p := range pools {
-				if p.Address == log.Address.Hex() {
-					p.SetDirty()
-				}
+			p, ok := byAddr[strings.ToLower(log.Address.Hex())]
+			if !ok {
+				continue
 			}
+			swapEventsSeen.Add(1)
+			if !shouldMarkDirty(log, p.Info) {
+				swapEventsIgnored.Add(1)
+				continue
+			}
+			p.SetDirty()
+			// Mark the global quote cache dirty immediately so the next
+			// block scans without waiting for a bridge ticker.
+			MarkDirty(p.Address)
 		}
 	}
 }
